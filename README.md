@@ -4,7 +4,7 @@ This is the code for our IJCNLP 17' paper entitled "Estimating Reactions and Rec
 
 
 Here is the link for the preprocessed dataset and the pretrained models on google drive.
-
+https://drive.google.com/drive/folders/1SCHWdxdhPIQ1PB13dXp-9npNvAJ3uyEO?usp=sharing
 
 Please put the data_dir and save_dir under the same folder of the code. Otherwise, you need to change the directory in the code correspondingly. 
 
