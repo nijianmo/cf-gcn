@@ -277,7 +277,6 @@ if __name__ == '__main__':
     epochs = 100
     batch_size = 256
     verbose = 1
-    #word2vec_mf_pretrain = 'save_dir/Pretrain/beer_GMF_8_neg_4_hr_0.5806_ndcg_0.3295.h5'
     word2vec_mf_pretrain = 'save_dir/Pretrain/beer_GMF_8_neg_4_hr_0.5865_ndcg_0.3345.h5'
     transform_dim = 256
     maxlen = 200 # sequence length
