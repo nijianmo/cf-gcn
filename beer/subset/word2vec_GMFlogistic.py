@@ -1,0 +1,231 @@
+'''
+Created on March 10, 2017
+
+@author: jianmo
+'''
+import numpy as np
+import theano.tensor as T
+import keras
+from keras import backend as K
+from keras import initializers
+from keras.models import Sequential, Model, load_model, save_model
+from keras.layers.core import Dense, Lambda, Activation
+from keras.layers import Embedding, Input, Dense, merge, Reshape, Merge, Flatten, Conv1D, MaxPooling1D, Dropout
+from keras.layers.merge import Concatenate, Add, Dot, concatenate, add, dot, multiply
+from keras.optimizers import Adagrad, Adam, SGD, RMSprop
+from keras.regularizers import l2
+from Dataset import Dataset
+from evaluate import evaluate_model
+from time import time
+import multiprocessing as mp
+import sys
+import math
+import os
+from keras.preprocessing.text import Tokenizer
+from keras.preprocessing.sequence import pad_sequences
+from keras.utils import to_categorical
+import cPickle as pickle
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
+
+def get_model(num_users, num_items, EMBEDDING_DIM, user_text_embedding_matrix, item_text_embedding_matrix, latent_dim, regs=[0,0], reg_text=0):
+    assert len(regs) == 2       # regularization for user and item, respectively
+    # Input variables
+    user_input = Input(shape=(1,), dtype='int32', name = 'user_input')
+    item_input = Input(shape=(1,), dtype='int32', name = 'item_input')
+
+    MF_Embedding_User = Embedding(input_dim = num_users, output_dim = latent_dim, name = 'user_embedding',
+                                  embeddings_initializer=initializers.random_normal(stddev=0.01), embeddings_regularizer = l2(regs[0]), input_length=1)
+    MF_Embedding_Item = Embedding(input_dim = num_items, output_dim = latent_dim, name = 'item_embedding',
+                                  embeddings_initializer=initializers.random_normal(stddev=0.01), embeddings_regularizer = l2(regs[1]), input_length=1)   
+
+    # load pre-calculated user text and item text embeddings into an Embedding layer
+    # note that we set trainable = False so as to keep the embeddings fixed
+    user_text_embedding_layer = Embedding(num_users,
+                                          EMBEDDING_DIM,
+                                          weights=[user_text_embedding_matrix],
+                                          input_length=1,
+                                          trainable=False)
+
+    item_text_embedding_layer = Embedding(num_items,
+                                          EMBEDDING_DIM,
+                                          weights=[item_text_embedding_matrix],
+                                          trainable=False)
+
+    user_text_latent = Flatten()(user_text_embedding_layer(user_input))
+    item_text_latent = Flatten()(item_text_embedding_layer(item_input))
+    enable_dropout = False
+    if enable_dropout:
+        user_text_latent = Dropout(0.2)(user_text_latent)
+        item_text_latent = Dropout(0.2)(item_text_latent)
+
+    # Crucial to transform into lower latent dimenstion
+    user_text_latent = Dense(latent_dim, kernel_regularizer=l2(reg_text), name = 'user_text_latent_transform')(user_text_latent)
+    item_text_latent = Dense(latent_dim, kernel_regularizer=l2(reg_text), name = 'item_text_latent_transform')(item_text_latent)
+ 
+    Embedding_User = Embedding(input_dim = num_users, output_dim = latent_dim, name = 'user_embedding_latent',
+                               embeddings_initializer=initializers.random_normal(stddev=0.01), embeddings_regularizer = l2(reg_text), input_length=1)
+    Embedding_Item = Embedding(input_dim = num_items, output_dim = latent_dim, name = 'item_embedding_latent',
+                               embeddings_initializer=initializers.random_normal(stddev=0.01), embeddings_regularizer = l2(reg_text), input_length=1)   
+
+    user_embedding_latent = Flatten()(Embedding_User(user_input))
+    item_embedding_latent = Flatten()(Embedding_Item(item_input))
+
+    # Element-wise product of user and item text embeddings 
+    #predict_vector_text = multiply([user_text_latent, item_text_latent])
+    predict_user_text = multiply([user_text_latent, item_embedding_latent])
+    predict_item_text = multiply([item_text_latent, user_embedding_latent])
+    predict_vector_text = concatenate([predict_user_text, predict_item_text])
+
+    # Crucial to flatten an embedding vector!
+    user_latent = Flatten()(MF_Embedding_User(user_input))
+    item_latent = Flatten()(MF_Embedding_Item(item_input))
+    
+    # Element-wise product of user and item embeddings 
+    predict_vector = multiply([user_latent, item_latent])
+
+    #predict_vector = add([predict_vector, predict_vector_text])
+    predict_vector = concatenate([predict_vector, predict_vector_text])
+    
+    # Final prediction layer
+    #prediction = Lambda(lambda x: K.sigmoid(K.sum(x)), output_shape=(1,))(predict_vector)
+    prediction = Dense(1, activation='sigmoid', kernel_initializer='lecun_uniform', name = 'prediction')(predict_vector)
+    
+    model = Model(inputs=[user_input, item_input], 
+                outputs=prediction)
+
+    return model
+
+def get_train_instances(train, num_negatives, weight_negatives, user_weights):
+    user_input, item_input, labels, weights = [],[],[],[]
+    num_users = train.shape[0]
+    for (u, i) in train.keys():
+        # positive instance
+        user_input.append(u)
+        item_input.append(i)
+        labels.append(1)
+        weights.append(user_weights[u])
+        # negative instances
+        for t in xrange(num_negatives):
+            j = np.random.randint(num_items)
+            while train.has_key((u, j)): # make sure there is no explicit pair (u,j)
+                j = np.random.randint(num_items)
+            user_input.append(u)
+            item_input.append(j)
+            labels.append(0)
+            weights.append(weight_negatives * user_weights[u])
+    return user_input, item_input, labels, weights
+
+if __name__ == '__main__':
+    dataset_name = "beer"
+    num_factors = 8
+    regs = [0,0]
+    reg_text = 0.001    
+    num_negatives = 4
+    weight_negatives = 1
+    learner = "Adam"
+    #learner = "SGD"
+    learning_rate = 0.001
+    epochs = 100
+    batch_size = 256
+    verbose = 1
+    mf_pretrain = ''    
+
+    if (len(sys.argv) > 3):
+        dataset_name = sys.argv[1]
+        num_factors = int(sys.argv[2])
+        regs = eval(sys.argv[3])
+        num_negatives = int(sys.argv[4])
+        weight_negatives = float(sys.argv[5])
+        learner = sys.argv[6]
+        learning_rate = float(sys.argv[7])
+        epochs = int(sys.argv[8])
+        batch_size = int(sys.argv[9])   
+        verbose = int(sys.argv[10])
+        
+    topK = 10
+    evaluation_threads = 1#mp.cpu_count()
+    logging.debug("word2_GMF-logistic (%s) Settings: num_factors=%d, batch_size=%d, learning_rate=%.1e, num_neg=%d, weight_neg=%.2f, regs=%s, reg_text=%.3f, epochs=%d, verbose=%d"
+          %(learner, num_factors, batch_size, learning_rate, num_negatives, weight_negatives, regs, reg_text, epochs, verbose))
+    
+    # Loading data
+    t1 = time()
+    dataset = Dataset("save_dir/Data/" + dataset_name)
+    train, testRatings, testNegatives = dataset.trainMatrix, dataset.testRatings, dataset.testNegatives
+    num_users, num_items = train.shape
+    total_weight_per_user = train.nnz / float(num_users)
+    train_csr, user_weights = train.tocsr(), []
+    for u in xrange(num_users):
+        user_weights.append(1)
+    logging.debug("Load data done [%.1f s]. #user=%d, #item=%d, #train=%d, #test=%d" 
+          %(time()-t1, num_users, num_items, train.nnz, len(testRatings)))
+
+    # load text data 
+    BEER_DIR = 'data_dir/word2vec-master/'
+    MAX_SEQUENCE_LENGTH = 1000
+    MAX_NB_WORDS = 20000
+    EMBEDDING_DIM = 64
+
+    logging.debug("MAX_SEQUENCE_LENGTH=%d, MAX_NB_WORDS=%d, EMBEDDING_DIM=%d" % (MAX_SEQUENCE_LENGTH,MAX_NB_WORDS,EMBEDDING_DIM))
+
+    with open('save_dir/useritem_text_embedding.pkl','rb') as fp:
+        user_text_embedding_matrix, item_text_embedding_matrix = pickle.load(fp)
+
+
+    # Build model
+    model = get_model(num_users, num_items, EMBEDDING_DIM, user_text_embedding_matrix, item_text_embedding_matrix, num_factors, regs, reg_text)
+    if learner.lower() == "adagrad": 
+        model.compile(optimizer=Adagrad(lr=learning_rate), loss='binary_crossentropy')
+    elif learner.lower() == "rmsprop":
+        model.compile(optimizer=RMSprop(lr=learning_rate), loss='binary_crossentropy')
+    elif learner.lower() == "adam":
+        model.compile(optimizer=Adam(lr=learning_rate), loss='binary_crossentropy')
+    else:
+        model.compile(optimizer=SGD(lr=learning_rate), loss='binary_crossentropy')
+
+    # Load pretrain model
+    if mf_pretrain != '':
+        model.load_weights(mf_pretrain, by_name=True)
+        print("Load pretrained GMF (%s) model done. " %(mf_pretrain))
+
+    #logging.debug(model.summary())
+    
+    # Init performance
+    (hits, ndcgs) = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)
+    hr, ndcg = np.array(hits).mean(), np.array(ndcgs).mean()
+    mf_embedding_norm = np.linalg.norm(model.get_layer('user_embedding').get_weights())+np.linalg.norm(model.get_layer('item_embedding').get_weights())
+    p_norm = np.linalg.norm(model.get_layer('prediction').get_weights()[0])
+    logging.debug('Init: HR = %.4f, NDCG = %.4f\t MF_norm=%.1f, p_norm=%.2f' % 
+          (hr, ndcg, mf_embedding_norm, p_norm))
+    
+    # Train model
+    loss_pre = sys.float_info.max
+    best_hr, best_ndcg = 0, 0
+    for epoch in xrange(epochs):
+        t1 = time()
+        # Generate training instances
+        user_input, item_input, labels, weights = get_train_instances(train, num_negatives, weight_negatives, user_weights)
+        
+        # Training
+        hist = model.fit([np.array(user_input), np.array(item_input)], #input
+                         np.array(labels), # labels 
+                         batch_size=batch_size, epochs=1, verbose=0, shuffle=True)
+        t2 = time()
+        
+        # Evaluation
+        if epoch %verbose == 0:
+            (hits, ndcgs) = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)
+            hr, ndcg, loss = np.array(hits).mean(), np.array(ndcgs).mean(), hist.history['loss'][0]
+            mf_embedding_norm = np.linalg.norm(model.get_layer('user_embedding').get_weights())+np.linalg.norm(model.get_layer('item_embedding').get_weights())
+            p_norm = np.linalg.norm(model.get_layer('prediction').get_weights()[0])
+            logging.debug('Iteration %d [%.1f s]: HR = %.4f, NDCG = %.4f, loss = %.4f [%.1f s] MF_norm=%.1f, p_norm=%.2f' 
+                  % (epoch,  t2 - t1, hr, ndcg, loss, time()-t2, mf_embedding_norm, p_norm))
+            if hr > best_hr:
+                best_hr = hr
+                if hr > 0.5:
+                    model.save_weights('save_dir/Pretrain/%s_word2vec_GMF_%d_neg_%d_hr_%.4f_ndcg_%.4f.h5' %(dataset_name, num_factors, num_negatives, hr, ndcg), overwrite=True)
+            if ndcg > best_ndcg:
+                best_ndcg = ndcg
+
+    logging.debug("End. best HR = %.4f, best NDCG = %.4f" %(best_hr, best_ndcg))
