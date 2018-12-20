@@ -20,12 +20,13 @@ Similary, you can generate reviews using the provided trained model by running t
 Note: under folder `lm' contains the pure char-level language model. We first use it to train a language model then load its weight as initialization for cf-gcn.
 
 
-If you find our code or dataset useful, please cite our paper. Thank!
+If you find our code or dataset useful, please cite our paper. Thanks!
 
+```
 @inproceedings{Ni2017EstimatingRA,
   title={Estimating Reactions and Recommending Products with Generative Models of Reviews},
   author={Jianmo Ni and Zachary Chase Lipton and Sharad Vikram and Julian McAuley},
   booktitle={IJCNLP},
   year={2017}
 }
-
+```
