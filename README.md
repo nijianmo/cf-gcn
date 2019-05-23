@@ -1,7 +1,7 @@
 ### cf-gcn
 This is the code for our IJCNLP 17' paper entitled "Estimating Reactions and Recommending Products with Generative Models of Reviews".
 
-Here is the link for the preprocessed dataset and the pretrained models on google drive. [link](https://drive.google.com/drive/folders/1SCHWdxdhPIQ1PB13dXp-9npNvAJ3uyEO?usp=sharing)
+Here is the link for the [preprocessed dataset and the pretrained models](https://drive.google.com/drive/folders/1SCHWdxdhPIQ1PB13dXp-9npNvAJ3uyEO?usp=sharing) on Google Drive.
 
 Please put the data_dir and save_dir under the same folder of the code. Otherwise, you need to change the directory in the code correspondingly. 
 
@@ -21,6 +21,7 @@ If you find our code or dataset useful, please cite our paper. Thanks!
   booktitle={IJCNLP},
   year={2017}
 }
+```
 
 ###Requirements
 - Python=2.7
